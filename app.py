@@ -19,7 +19,6 @@ def start(message):
     bot.reply_to(message, f"Привет, {message.from_user.first_name}! Напиши мне название города, и я скажу погоду. 🌤️")
 
 @bot.message_handler(func=lambda message: True)
-
 def get_weather(message):
     try:
         city = message.text.strip()
@@ -41,6 +40,10 @@ def get_weather(message):
             f"&timezone=auto"
         )
         w_resp = requests.get(weather_url, timeout=10).json()
+
+        if "current" not in w_resp:
+            bot.reply_to(message, f"DEBUG: {str(w_resp)[:400]}")
+            return
 
         cur = w_resp["current"]
         temp = cur["temperature_2m"]
@@ -70,6 +73,7 @@ def get_weather(message):
 
     except Exception as e:
         bot.reply_to(message, f"Ошибка: {e}")
+
 WEBHOOK_URL = f"https://weather-bot-0v1m.onrender.com/{BOT_TOKEN}"
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
