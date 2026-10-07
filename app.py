@@ -46,6 +46,18 @@ WTTR_TRANSLATIONS = {
     "Moderate or heavy rain shower": "Сильный ливень 🌧️",
 }
 
+COUNTRY_RU = {
+    "Russia": "Россия", "Kazakhstan": "Казахстан", "Norway": "Норвегия",
+    "Ukraine": "Украина", "Belarus": "Беларусь", "Germany": "Германия",
+    "France": "Франция", "USA": "США", "United States of America": "США",
+    "United Kingdom": "Великобритания", "Turkey": "Турция", "China": "Китай",
+    "Japan": "Япония", "Italy": "Италия", "Spain": "Испания",
+    "Poland": "Польша", "Netherlands": "Нидерланды", "Finland": "Финляндия",
+    "Sweden": "Швеция", "Georgia": "Грузия", "Armenia": "Армения",
+    "Uzbekistan": "Узбекистан", "Kyrgyzstan": "Кыргызстан",
+    "Azerbaijan": "Азербайджан", "Moldova": "Молдова",
+}
+
 def try_open_meteo(city):
     try:
         geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=ru"
@@ -106,14 +118,13 @@ def try_wttr(city):
 
         desc = WTTR_TRANSLATIONS.get(desc, desc)
 
-        city_name = city
+        city_name = city.capitalize()
         country = ""
         if "nearest_area" in resp and resp["nearest_area"]:
             area = resp["nearest_area"][0]
-            if "areaName" in area and area["areaName"]:
-                city_name = area["areaName"][0].get("value", city)
             if "country" in area and area["country"]:
                 country = area["country"][0].get("value", "")
+                country = COUNTRY_RU.get(country, country)
 
         return (
             f"📍 <b>{city_name}</b>, {country}\n"
