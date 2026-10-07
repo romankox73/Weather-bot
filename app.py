@@ -24,6 +24,28 @@ WEATHER_DESC = {
     95: "Гроза ⛈️", 96: "Гроза с градом ⛈️", 99: "Гроза с градом ⛈️",
 }
 
+WTTR_TRANSLATIONS = {
+    "Sunny": "Ясно ☀️", "Clear": "Ясно ☀️",
+    "Partly cloudy": "Переменная облачность ⛅",
+    "Cloudy": "Облачно ☁️", "Overcast": "Пасмурно ☁️",
+    "Mist": "Дымка 🌫️", "Fog": "Туман 🌫️",
+    "Patchy rain nearby": "Местами дождь 🌦️",
+    "Patchy rain possible": "Возможен дождь 🌦️",
+    "Light rain": "Небольшой дождь 🌧️",
+    "Moderate rain": "Дождь 🌧️",
+    "Heavy rain": "Сильный дождь 🌧️",
+    "Light drizzle": "Морось 🌦️",
+    "Patchy light drizzle": "Местами морось 🌦️",
+    "Light snow": "Небольшой снег ❄️",
+    "Moderate snow": "Снег ❄️", "Heavy snow": "Сильный снег ❄️",
+    "Blizzard": "Метель ❄️", "Sleet": "Мокрый снег 🌨️",
+    "Thundery outbreaks possible": "Возможны грозы ⛈️",
+    "Patchy light rain with thunder": "Местами дождь с грозой ⛈️",
+    "Moderate or heavy rain with thunder": "Сильный дождь с грозой ⛈️",
+    "Light rain shower": "Небольшой ливень 🌦️",
+    "Moderate or heavy rain shower": "Сильный ливень 🌧️",
+}
+
 def try_open_meteo(city):
     try:
         geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=ru"
@@ -81,6 +103,8 @@ def try_wttr(city):
             desc = cur["lang_ru"][0].get("value", desc)
         elif "weatherDesc" in cur and cur["weatherDesc"]:
             desc = cur["weatherDesc"][0].get("value", desc)
+
+        desc = WTTR_TRANSLATIONS.get(desc, desc)
 
         city_name = city
         country = ""
