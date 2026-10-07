@@ -1,11 +1,8 @@
 import os
-import threading
 import telebot
 import requests
-from flask import Flask
-import time
-# Токен: сначала пробуем из переменной окружения (для Render),
-# если её нет — берём из config.py (для Termux)
+from flask import Flask, request
+
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not BOT_TOKEN:
     try:
@@ -77,13 +74,17 @@ def get_weather(message):
     )
     bot.reply_to(message, text, parse_mode="HTML")
 
-def run_bot():
-    while True:
-        try:
-            bot.polling(none_stop=True, skip_pending=True)
-        except Exception as e:
-            print(f"Бот упал: {e}")
-            time.sleep(5)
+WEBHOOK_URL = f"https://weather-bot-0v1m.onrender.com/{BOT_TOKEN}"
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    else:
+        return 'Forbidden', 403
 
 @app.route('/')
 def index():
@@ -94,6 +95,7 @@ def health():
     return "OK"
 
 if __name__ == "__main__":
-    threading.Thread(target=run_bot, daemon=True).start()
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL)
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
