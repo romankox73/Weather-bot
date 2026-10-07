@@ -3,7 +3,7 @@ import threading
 import telebot
 import requests
 from flask import Flask
-
+import time
 # Токен: сначала пробуем из переменной окружения (для Render),
 # если её нет — берём из config.py (для Termux)
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -78,7 +78,12 @@ def get_weather(message):
     bot.reply_to(message, text, parse_mode="HTML")
 
 def run_bot():
-    bot.polling(none_stop=True, skip_pending=True)
+    while True:
+        try:
+            bot.polling(none_stop=True, skip_pending=True)
+        except Exception as e:
+            print(f"Бот упал: {e}")
+            time.sleep(5)
 
 @app.route('/')
 def index():
