@@ -32,9 +32,9 @@ WTTR_TRANSLATIONS = {
     "Patchy rain nearby": "Местами дождь 🌦️",
     "Patchy rain possible": "Возможен дождь 🌦️",
     "Light rain": "Небольшой дождь 🌧️",
+    "Light drizzle": "Слабая морось 🌦️",
     "Moderate rain": "Дождь 🌧️",
     "Heavy rain": "Сильный дождь 🌧️",
-    "Light drizzle": "Морось 🌦️",
     "Patchy light drizzle": "Местами морось 🌦️",
     "Light snow": "Небольшой снег ❄️",
     "Moderate snow": "Снег ❄️", "Heavy snow": "Сильный снег ❄️",
@@ -44,18 +44,48 @@ WTTR_TRANSLATIONS = {
     "Moderate or heavy rain with thunder": "Сильный дождь с грозой ⛈️",
     "Light rain shower": "Небольшой ливень 🌦️",
     "Moderate or heavy rain shower": "Сильный ливень 🌧️",
+    "Patchy light rain": "Местами небольшой дождь 🌦️",
+    "Moderate or heavy rain shower": "Сильный ливень 🌧️",
+    "Light freezing rain": "Слабый ледяной дождь 🌧️",
+    "Moderate or heavy freezing rain": "Сильный ледяной дождь 🌧️",
 }
 
 COUNTRY_RU = {
-    "Russia": "Россия", "Kazakhstan": "Казахстан", "Norway": "Норвегия",
-    "Ukraine": "Украина", "Belarus": "Беларусь", "Germany": "Германия",
-    "France": "Франция", "USA": "США", "United States of America": "США",
-    "United Kingdom": "Великобритания", "Turkey": "Турция", "China": "Китай",
-    "Japan": "Япония", "Italy": "Италия", "Spain": "Испания",
-    "Poland": "Польша", "Netherlands": "Нидерланды", "Finland": "Финляндия",
-    "Sweden": "Швеция", "Georgia": "Грузия", "Armenia": "Армения",
-    "Uzbekistan": "Узбекистан", "Kyrgyzstan": "Кыргызстан",
-    "Azerbaijan": "Азербайджан", "Moldova": "Молдова",
+    "Russia": "Россия", "Kazakhstan": "Казахстан", "Ukraine": "Украина",
+    "Belarus": "Беларусь", "Norway": "Норвегия", "Sweden": "Швеция",
+    "Finland": "Финляндия", "Denmark": "Дания", "Iceland": "Исландия",
+    "Germany": "Германия", "France": "Франция", "Italy": "Италия",
+    "Spain": "Испания", "Portugal": "Португалия", "Poland": "Польша",
+    "Netherlands": "Нидерланды", "Belgium": "Бельгия",
+    "Switzerland": "Швейцария", "Austria": "Австрия",
+    "Czech Republic": "Чехия", "Czechia": "Чехия", "Slovakia": "Словакия",
+    "Hungary": "Венгрия", "Romania": "Румыния", "Bulgaria": "Болгария",
+    "Greece": "Греция", "Turkey": "Турция", "Serbia": "Сербия",
+    "Croatia": "Хорватия", "Slovenia": "Словения",
+    "United Kingdom": "Великобритания", "Ireland": "Ирландия",
+    "USA": "США", "United States of America": "США",
+    "Canada": "Канада", "Mexico": "Мексика", "Brazil": "Бразилия",
+    "Argentina": "Аргентина", "Chile": "Чили", "Peru": "Перу",
+    "China": "Китай", "Japan": "Япония", "South Korea": "Южная Корея",
+    "Korea": "Корея", "India": "Индия", "Thailand": "Таиланд",
+    "Vietnam": "Вьетнам", "Indonesia": "Индонезия",
+    "Malaysia": "Малайзия", "Singapore": "Сингапур",
+    "Philippines": "Филиппины", "Australia": "Австралия",
+    "New Zealand": "Новая Зеландия", "Egypt": "Египет",
+    "Morocco": "Марокко", "Tunisia": "Тунис", "Algeria": "Алжир",
+    "South Africa": "ЮАР", "Kenya": "Кения", "Tanzania": "Танзания",
+    "Ethiopia": "Эфиопия", "Nigeria": "Нигерия", "Ghana": "Гана",
+    "Israel": "Израиль", "Saudi Arabia": "Саудовская Аравия",
+    "United Arab Emirates": "ОАЭ", "UAE": "ОАЭ", "Qatar": "Катар",
+    "Iran": "Иран", "Iraq": "Ирак", "Pakistan": "Пакистан",
+    "Afghanistan": "Афганистан", "Georgia": "Грузия",
+    "Armenia": "Армения", "Azerbaijan": "Азербайджан",
+    "Uzbekistan": "Узбекистан", "Turkmenistan": "Туркменистан",
+    "Kyrgyzstan": "Кыргызстан", "Tajikistan": "Таджикистан",
+    "Mongolia": "Монголия", "Nepal": "Непал", "Cuba": "Куба",
+    "Moldova": "Молдова", "Latvia": "Латвия", "Lithuania": "Литва",
+    "Estonia": "Эстония", "Cyprus": "Кипр", "Malta": "Мальта",
+    "Luxembourg": "Люксембург", "Monaco": "Монако",
 }
 
 def try_open_meteo(city):
@@ -68,6 +98,7 @@ def try_open_meteo(city):
         loc = geo_resp["results"][0]
         lat, lon = loc["latitude"], loc["longitude"]
         country = loc.get("country", "")
+        country = COUNTRY_RU.get(country, country)
 
         weather_url = (
             f"https://api.open-meteo.com/v1/forecast?"
