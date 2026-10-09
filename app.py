@@ -17,6 +17,13 @@ bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
 # ==================== БУРОВЫЕ ====================
+RELEVANCE_LABEL = {
+    "A": "⭐",
+    "B": "○",
+    "C": "·",
+}
+RELEVANCE_ORDER = {"A": 0, "B": 1, "C": 2, "": 3}
+
 def load_bur_data():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_cities.csv")
     data = {}
@@ -29,17 +36,28 @@ def load_bur_data():
             city = (row.get("searchCity") or row.get("city") or "").strip()
             if not city:
                 continue
+            relevance = (row.get("relevance") or "").strip().upper()
             data.setdefault(city, []).append({
                 "name": (row.get("name") or "Без названия").strip(),
                 "phone": (row.get("allPhones") or row.get("phone") or "—").strip(),
                 "email": (row.get("email") or "—").strip(),
+                "relevance": relevance,
             })
+    # Сортируем: A → B → C
+    for city in data:
+        data[city].sort(key=lambda x: RELEVANCE_ORDER.get(x["relevance"], 3))
     return data
 
 BUR_DATA = load_bur_data()
 CITIES = sorted(BUR_DATA.keys())
 PER_PAGE = 5
 print(f"[i] Загружено городов: {len(CITIES)}")
+
+def count_relevance(items):
+    a = sum(1 for x in items if x["relevance"] == "A")
+    b = sum(1 for x in items if x["relevance"] == "B")
+    c = sum(1 for x in items if x["relevance"] == "C")
+    return a, b, c
 
 # ==================== КЛАВИАТУРЫ ====================
 def main_menu():
@@ -62,6 +80,7 @@ def render_companies(city_idx, page):
     city = CITIES[city_idx]
     items = BUR_DATA[city]
     total = len(items)
+    a, b, c = count_relevance(items)
     total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
     if page < 0:
         page = 0
@@ -70,9 +89,11 @@ def render_companies(city_idx, page):
     start = page * PER_PAGE
     chunk = items[start:start + PER_PAGE]
 
-    text = f"🏢 <b>{city}</b> — всего {total}\n\n"
-    for i, c in enumerate(chunk, start=start + 1):
-        text += f"<b>{i}. {c['name']}</b>\n📞 {c['phone']}\n✉️ {c['email']}\n\n"
+    text = f"🏢 <b>{city}</b> — всего {total}\n"
+    text += f"⭐ {a}  ○ {b}  · {c}\n\n"
+    for i, item in enumerate(chunk, start=start + 1):
+        mark = RELEVANCE_LABEL.get(item["relevance"], "")
+        text += f"{mark} <b>{i}. {item['name']}</b>\n📞 {item['phone']}\n✉️ {item['email']}\n\n"
     text += f"Страница {page + 1} из {total_pages}"
 
     m = types.InlineKeyboardMarkup(row_width=3)
@@ -147,7 +168,6 @@ WTTR_TRANSLATIONS = {
     "Moderate rain": "Дождь 🌧️",
     "Heavy rain": "Сильный дождь 🌧️",
     "Light drizzle": "Слабая морось 🌦️",
-    "Patchy light drizzle": "Местами морось 🌦️",
     "Light snow": "Небольшой снег ❄️",
     "Moderate snow": "Снег ❄️", "Heavy snow": "Сильный снег ❄️",
     "Blizzard": "Метель ❄️", "Sleet": "Мокрый снег 🌨️",
