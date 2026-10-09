@@ -4,8 +4,10 @@ import telebot
 import requests
 from telebot import types
 from flask import Flask, request
+from datetime import datetime
 
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 if not BOT_TOKEN:
     try:
         from config import BOT_TOKEN as CFG_TOKEN
@@ -17,11 +19,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
 # ==================== БУРОВЫЕ ====================
-RELEVANCE_LABEL = {
-    "A": "⭐",
-    "B": "○",
-    "C": "·",
-}
+RELEVANCE_LABEL = {"A": "⭐", "B": "○", "C": "·"}
 RELEVANCE_ORDER = {"A": 0, "B": 1, "C": 2, "": 3}
 
 def load_bur_data():
@@ -43,7 +41,6 @@ def load_bur_data():
                 "email": (row.get("email") or "—").strip(),
                 "relevance": relevance,
             })
-    # Сортируем: A → B → C
     for city in data:
         data[city].sort(key=lambda x: RELEVANCE_ORDER.get(x["relevance"], 3))
     return data
@@ -59,12 +56,55 @@ def count_relevance(items):
     c = sum(1 for x in items if x["relevance"] == "C")
     return a, b, c
 
+# ==================== APIFY BALANCE ====================
+def get_apify_balance():
+    if not APIFY_TOKEN:
+        return "⚠️ Токен Apify не настроен.\nДобавь APIFY_TOKEN в Environment на Render."
+    try:
+        url = f"https://api.apify.com/v2/users/me?token={APIFY_TOKEN}"
+        r = requests.get(url, timeout=15).json()
+        d = r.get("data", {})
+        plan = d.get("plan", {})
+        cycle = plan.get("monthlyUsageCycle", {})
+        limit = plan.get("maxMonthlyUsageUsd", 5)
+        end_at_str = cycle.get("endAt", "")
+
+        url2 = f"https://api.apify.com/v2/users/me/usage?token={APIFY_TOKEN}"
+        r2 = requests.get(url2, timeout=15).json()
+        used = r2.get("data", {}).get("monthlyUsageCycle", {}).get("totalUsageCreditsUsd", 0)
+
+        if end_at_str:
+            end_at = datetime.fromisoformat(end_at_str.replace("Z", "+00:00"))
+            now = datetime.now(end_at.tzinfo)
+            days_left = (end_at - now).days
+            end_str = end_at.strftime("%d.%m.%Y")
+        else:
+            days_left = "?"
+            end_str = "?"
+
+        remaining = limit - used
+        cities_left = int(remaining / 0.15) if remaining > 0 else 0
+        return (
+            f"💰 <b>Баланс Apify</b>\n\n"
+            f"Потрачено: <b>${used:.2f}</b> из ${limit:.2f}\n"
+            f"Остаток:   <b>${remaining:.2f}</b>\n\n"
+            f"📅 Следующее начисление: <b>{end_str}</b>\n"
+            f"⏳ Осталось дней: <b>{days_left}</b>\n\n"
+            f"💡 Хватит ещё на <b>~{cities_left}</b> городов"
+        )
+    except Exception as e:
+        print(f"apify balance error: {e}")
+        return f"⚠️ Не удалось получить баланс: {e}"
+
 # ==================== КЛАВИАТУРЫ ====================
 def main_menu():
     m = types.InlineKeyboardMarkup(row_width=2)
     m.add(
         types.InlineKeyboardButton("🌤 Погода", callback_data="menu:weather"),
         types.InlineKeyboardButton("🏢 Буровые", callback_data="menu:bur"),
+    )
+    m.add(
+        types.InlineKeyboardButton("💰 Баланс Apify", callback_data="menu:balance"),
     )
     return m
 
@@ -119,6 +159,15 @@ def cb_menu_start(call):
 def cb_menu_weather(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text("🌤 Напиши название города — пришлю погоду.", call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "menu:balance")
+def cb_menu_balance(call):
+    bot.answer_callback_query(call.id, "Считаю баланс...")
+    text = get_apify_balance()
+    m = types.InlineKeyboardMarkup()
+    m.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="menu:balance"))
+    m.add(types.InlineKeyboardButton("🏠 В меню", callback_data="menu:start"))
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=m, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu:bur")
 def cb_menu_bur(call):
