@@ -65,14 +65,15 @@ def get_apify_balance():
         r = requests.get(url, timeout=15).json()
         d = r.get("data", {})
         plan = d.get("plan", {})
-        cycle = plan.get("monthlyUsageCycle", {})
         limit = plan.get("maxMonthlyUsageUsd", 5)
-        end_at_str = cycle.get("endAt", "")
 
         url2 = f"https://api.apify.com/v2/users/me/usage?token={APIFY_TOKEN}"
         r2 = requests.get(url2, timeout=15).json()
-        used = r2.get("data", {}).get("monthlyUsageCycle", {}).get("totalUsageCreditsUsd", 0)
+        current = r2.get("data", {}).get("current", {})
+        used = current.get("monthlyUsageUsd", 0)
 
+        cycle = r2.get("data", {}).get("monthlyUsageCycle", {})
+        end_at_str = cycle.get("endAt", "")
         if end_at_str:
             end_at = datetime.fromisoformat(end_at_str.replace("Z", "+00:00"))
             now = datetime.now(end_at.tzinfo)
