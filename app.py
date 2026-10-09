@@ -4,7 +4,6 @@ import telebot
 import requests
 from telebot import types
 from flask import Flask, request
-from datetime import datetime
 
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
@@ -61,37 +60,23 @@ def get_apify_balance():
     if not APIFY_TOKEN:
         return "⚠️ Токен Apify не настроен.\nДобавь APIFY_TOKEN в Environment на Render."
     try:
-        url = f"https://api.apify.com/v2/users/me?token={APIFY_TOKEN}"
+        url = f"https://api.apify.com/v2/users/me/limits?token={APIFY_TOKEN}"
         r = requests.get(url, timeout=15).json()
         d = r.get("data", {})
-        plan = d.get("plan", {})
-        limit = plan.get("maxMonthlyUsageUsd", 5)
-
-        url2 = f"https://api.apify.com/v2/users/me/usage?token={APIFY_TOKEN}"
-        r2 = requests.get(url2, timeout=15).json()
-        current = r2.get("data", {}).get("current", {})
+        current = d.get("current", {})
         used = current.get("monthlyUsageUsd", 0)
-
-        cycle = r2.get("data", {}).get("monthlyUsageCycle", {})
-        end_at_str = cycle.get("endAt", "")
-        if end_at_str:
-            end_at = datetime.fromisoformat(end_at_str.replace("Z", "+00:00"))
-            now = datetime.now(end_at.tzinfo)
-            days_left = (end_at - now).days
-            end_str = end_at.strftime("%d.%m.%Y")
-        else:
-            days_left = "?"
-            end_str = "?"
+        limit = d.get("maxMonthlyUsageUsd", 5)
 
         remaining = limit - used
         cities_left = int(remaining / 0.15) if remaining > 0 else 0
+        percent = int((used / limit) * 100) if limit > 0 else 0
+
         return (
             f"💰 <b>Баланс Apify</b>\n\n"
             f"Потрачено: <b>${used:.2f}</b> из ${limit:.2f}\n"
-            f"Остаток:   <b>${remaining:.2f}</b>\n\n"
-            f"📅 Следующее начисление: <b>{end_str}</b>\n"
-            f"⏳ Осталось дней: <b>{days_left}</b>\n\n"
-            f"💡 Хватит ещё на <b>~{cities_left}</b> городов"
+            f"Остаток:   <b>${remaining:.2f}</b>  ({percent}% израсходовано)\n\n"
+            f"💡 Хватит ещё на <b>~{cities_left}</b> городов\n"
+            f"📅 Следующие $5 придут ~7-го числа"
         )
     except Exception as e:
         print(f"apify balance error: {e}")
