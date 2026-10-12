@@ -94,6 +94,11 @@ def main_menu():
     )
     return m
 
+def back_to_menu_btn():
+    m = types.InlineKeyboardMarkup()
+    m.add(types.InlineKeyboardButton("🏠 В меню", callback_data="menu:start"))
+    return m
+
 def cities_menu():
     m = types.InlineKeyboardMarkup(row_width=3)
     buttons = [types.InlineKeyboardButton(c, callback_data=f"city:{i}") for i, c in enumerate(CITIES)]
@@ -144,7 +149,12 @@ def cb_menu_start(call):
 @bot.callback_query_handler(func=lambda call: call.data == "menu:weather")
 def cb_menu_weather(call):
     bot.answer_callback_query(call.id)
-    bot.edit_message_text("🌤 Напиши название города — пришлю погоду.", call.message.chat.id, call.message.message_id)
+    bot.edit_message_text(
+        "🌤 Напиши название города — пришлю погоду:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=back_to_menu_btn()
+    )
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu:balance")
 def cb_menu_balance(call):
@@ -159,7 +169,7 @@ def cb_menu_balance(call):
 def cb_menu_bur(call):
     bot.answer_callback_query(call.id)
     if not CITIES:
-        bot.edit_message_text("Данные буровых ещё не загружены.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("Данные буровых ещё не загружены.", call.message.chat.id, call.message.message_id, reply_markup=back_to_menu_btn())
         return
     bot.edit_message_text(f"🏢 Выбери город (всего {len(CITIES)}):", call.message.chat.id, call.message.message_id, reply_markup=cities_menu())
 
@@ -294,11 +304,11 @@ def get_weather(message):
         if result is None or result == "NOT_FOUND":
             result = try_wttr(city)
         if result is None:
-            bot.reply_to(message, f"Не могу получить погоду для '{city}'. Попробуй позже.")
+            bot.reply_to(message, f"Не могу получить погоду для '{city}'. Попробуй позже.", reply_markup=back_to_menu_btn())
             return
-        bot.reply_to(message, result, parse_mode="HTML")
+        bot.reply_to(message, result, parse_mode="HTML", reply_markup=back_to_menu_btn())
     except Exception as e:
-        bot.reply_to(message, f"Ошибка: {e}")
+        bot.reply_to(message, f"Ошибка: {e}", reply_markup=back_to_menu_btn())
 
 # ==================== WEBHOOK ====================
 WEBHOOK_URL = f"https://weather-bot-0v1m.onrender.com/{BOT_TOKEN}"
