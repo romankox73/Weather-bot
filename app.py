@@ -6,7 +6,6 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from telebot import types
 from flask import Flask, request
-from datetime import datetime
 
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
@@ -21,7 +20,7 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# ==================== БАЗА ДАННЫХ ====================
+# ==================== БАЗА ====================
 STATUS_LABELS = {
     "not_called": "⚪ Не звонили",
     "called": "📞 Дозвонились",
@@ -29,6 +28,7 @@ STATUS_LABELS = {
     "thinking": "🤔 Думает",
     "client": "✅ Клиент",
     "refused": "❌ Отказ",
+    "skipped": "⏭ Пропущен",
 }
 
 def db():
@@ -55,13 +55,11 @@ def init_db():
             if count == 0:
                 print("[i] Заливаю компании из CSV в базу...")
                 load_csv_to_db(cur)
-                print(f"[i] Загружено компаний: {cur.rowcount}")
         conn.commit()
 
 def load_csv_to_db(cur):
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_cities.csv")
     if not os.path.exists(path):
-        print(f"[!] all_cities.csv не найден: {path}")
         return
     with open(path, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -87,25 +85,30 @@ def get_stats():
             total = cur.fetchone()[0]
     return total, stats
 
-def get_next_client():
-    """Следующий клиент для обзвона: сначала A, потом B, потом C, только 'not_called'"""
+def get_next_client(status="not_called"):
     with db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT * FROM clients
-                WHERE status = 'not_called'
+                WHERE status = %s
                 ORDER BY
                     CASE relevance WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 ELSE 4 END,
                     id
                 LIMIT 1;
-            """)
+            """, (status,))
             return cur.fetchone()
 
-def get_client(client_id):
+def get_queue_count():
     with db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM clients WHERE id = %s;", (client_id,))
-            return cur.fetchone()
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM clients WHERE status = 'not_called';")
+            return cur.fetchone()[0]
+
+def get_skipped_count():
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM clients WHERE status = 'skipped';")
+            return cur.fetchone()[0]
 
 def set_status(client_id, status):
     with db() as conn:
@@ -116,7 +119,7 @@ def set_status(client_id, status):
             )
         conn.commit()
 
-# ==================== БУРОВЫЕ (справочник) ====================
+# ==================== БУРОВЫЕ ====================
 RELEVANCE_LABEL = {"A": "⭐", "B": "○", "C": "·"}
 RELEVANCE_ORDER = {"A": 0, "B": 1, "C": 2, "": 3}
 
@@ -124,7 +127,6 @@ def load_bur_data():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_cities.csv")
     data = {}
     if not os.path.exists(path):
-        print(f"[!] all_cities.csv не найден: {path}")
         return data
     with open(path, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -175,7 +177,6 @@ def get_apify_balance():
             f"📅 Следующие $5 придут ~7-го числа"
         )
     except Exception as e:
-        print(f"apify balance error: {e}")
         return f"⚠️ Не удалось получить баланс: {e}"
 
 # ==================== КЛАВИАТУРЫ ====================
@@ -197,8 +198,12 @@ def back_to_menu_btn():
     return m
 
 def crm_menu():
+    queue = get_queue_count()
+    skipped = get_skipped_count()
     m = types.InlineKeyboardMarkup(row_width=2)
-    m.add(types.InlineKeyboardButton("📞 Начать обзвон", callback_data="crm:next"))
+    m.add(types.InlineKeyboardButton(f"📞 Обзвон ({queue})", callback_data="crm:next"))
+    if skipped > 0:
+        m.add(types.InlineKeyboardButton(f"⏭ Пропущенные ({skipped})", callback_data="crm:skipped"))
     m.add(types.InlineKeyboardButton("📊 Статистика", callback_data="crm:stats"))
     m.add(types.InlineKeyboardButton("🏠 В меню", callback_data="menu:start"))
     return m
@@ -215,8 +220,22 @@ def client_card_markup(client_id):
     )
     m.add(
         types.InlineKeyboardButton("❌ Отказ", callback_data=f"crm:set:{client_id}:refused"),
-        types.InlineKeyboardButton("⏭ Пропустить", callback_data="crm:next"),
+        types.InlineKeyboardButton("⏭ Пропустить", callback_data=f"crm:set:{client_id}:skipped"),
     )
+    m.add(types.InlineKeyboardButton("◀️ В CRM", callback_data="crm:menu"))
+    return m
+
+def skipped_card_markup(client_id):
+    m = types.InlineKeyboardMarkup(row_width=2)
+    m.add(
+        types.InlineKeyboardButton("↩️ В очередь", callback_data=f"crm:set:{client_id}:not_called"),
+        types.InlineKeyboardButton("📞 Дозвонились", callback_data=f"crm:set:{client_id}:called"),
+    )
+    m.add(
+        types.InlineKeyboardButton("📨 КП", callback_data=f"crm:set:{client_id}:kp_sent"),
+        types.InlineKeyboardButton("❌ Отказ", callback_data=f"crm:set:{client_id}:refused"),
+    )
+    m.add(types.InlineKeyboardButton("⏭ Следующий пропущенный", callback_data="crm:skipped"))
     m.add(types.InlineKeyboardButton("◀️ В CRM", callback_data="crm:menu"))
     return m
 
@@ -259,23 +278,53 @@ def render_companies(city_idx, page):
 
 def render_client_card(client):
     if not client:
+        skipped = get_skipped_count()
+        if skipped > 0:
+            m = types.InlineKeyboardMarkup()
+            m.add(types.InlineKeyboardButton(f"⏭ К пропущенным ({skipped})", callback_data="crm:skipped"))
+            m.add(types.InlineKeyboardButton("◀️ В CRM", callback_data="crm:menu"))
+            return (
+                "✅ <b>Очередь пуста!</b>\n\n"
+                f"Все обработаны, но осталось <b>{skipped}</b> пропущенных.\n"
+                "Можешь к ним вернуться.",
+                m
+            )
         return (
             "✅ <b>Все клиенты обработаны!</b>\n\n"
-            "В базе не осталось компаний со статусом «Не звонили».\n"
-            "Можешь посмотреть статистику или добавить новых через Apify.",
+            "Отличная работа! Все компании прошли через CRM.",
             crm_menu()
         )
     mark = RELEVANCE_LABEL.get(client["relevance"], "")
     status = STATUS_LABELS.get(client["status"], client["status"])
+    queue = get_queue_count()
     text = (
         f"{mark} <b>{client['name']}</b>\n\n"
         f"🏙 {client['city'] or '—'}\n"
         f"📞 {client['phone'] or '—'}\n"
         f"✉️ {client['email'] or '—'}\n"
-        f"📊 Статус: {status}\n\n"
+        f"📊 Статус: {status}\n"
+        f"📋 Осталось в очереди: <b>{queue}</b>\n\n"
         f"Выбери действие:"
     )
     return text, client_card_markup(client["id"])
+
+def render_skipped_card(client):
+    if not client:
+        return (
+            "✅ Пропущенных нет!",
+            crm_menu()
+        )
+    skipped = get_skipped_count()
+    text = (
+        f"⏭ <b>{client['name']}</b>\n\n"
+        f"🏙 {client['city'] or '—'}\n"
+        f"📞 {client['phone'] or '—'}\n"
+        f"✉️ {client['email'] or '—'}\n"
+        f"📊 Статус: {STATUS_LABELS.get(client['status'], client['status'])}\n"
+        f"⏭ Всего пропущено: <b>{skipped}</b>\n\n"
+        f"Вернуть в очередь или сразу обработать?"
+    )
+    return text, skipped_card_markup(client["id"])
 
 # ==================== ОБРАБОТЧИКИ ====================
 @bot.message_handler(commands=['start'])
@@ -292,8 +341,7 @@ def cb_menu_weather(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text(
         "🌤 Напиши название города — пришлю погоду:",
-        call.message.chat.id,
-        call.message.message_id,
+        call.message.chat.id, call.message.message_id,
         reply_markup=back_to_menu_btn()
     )
 
@@ -351,8 +399,15 @@ def cb_crm_stats(call):
 @bot.callback_query_handler(func=lambda call: call.data == "crm:next")
 def cb_crm_next(call):
     bot.answer_callback_query(call.id)
-    client = get_next_client()
+    client = get_next_client("not_called")
     text, markup = render_client_card(client)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "crm:skipped")
+def cb_crm_skipped(call):
+    bot.answer_callback_query(call.id)
+    client = get_next_client("skipped")
+    text, markup = render_skipped_card(client)
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("crm:set:"))
@@ -360,8 +415,12 @@ def cb_crm_set(call):
     _, _, client_id, status = call.data.split(":")
     set_status(int(client_id), status)
     bot.answer_callback_query(call.id, f"Статус: {STATUS_LABELS.get(status, status)}")
-    client = get_next_client()
-    text, markup = render_client_card(client)
+    if status == "not_called":
+        client = get_next_client("skipped")
+        text, markup = render_skipped_card(client)
+    else:
+        client = get_next_client("not_called")
+        text, markup = render_client_card(client)
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 # ==================== ПОГОДА ====================
