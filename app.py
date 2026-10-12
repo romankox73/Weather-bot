@@ -2,11 +2,15 @@ import os
 import csv
 import telebot
 import requests
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from telebot import types
 from flask import Flask, request
+from datetime import datetime
 
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 if not BOT_TOKEN:
     try:
         from config import BOT_TOKEN as CFG_TOKEN
@@ -17,7 +21,102 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# ==================== БУРОВЫЕ ====================
+# ==================== БАЗА ДАННЫХ ====================
+STATUS_LABELS = {
+    "not_called": "⚪ Не звонили",
+    "called": "📞 Дозвонились",
+    "kp_sent": "📨 КП отправлено",
+    "thinking": "🤔 Думает",
+    "client": "✅ Клиент",
+    "refused": "❌ Отказ",
+}
+
+def db():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+def init_db():
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS clients (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    phone TEXT,
+                    email TEXT,
+                    city TEXT,
+                    relevance TEXT,
+                    status TEXT DEFAULT 'not_called',
+                    note TEXT DEFAULT '',
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            cur.execute("SELECT COUNT(*) FROM clients;")
+            count = cur.fetchone()[0]
+            if count == 0:
+                print("[i] Заливаю компании из CSV в базу...")
+                load_csv_to_db(cur)
+                print(f"[i] Загружено компаний: {cur.rowcount}")
+        conn.commit()
+
+def load_csv_to_db(cur):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_cities.csv")
+    if not os.path.exists(path):
+        print(f"[!] all_cities.csv не найден: {path}")
+        return
+    with open(path, encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            cur.execute(
+                "INSERT INTO clients (name, phone, email, city, relevance) VALUES (%s, %s, %s, %s, %s)",
+                (
+                    (row.get("name") or "Без названия").strip(),
+                    (row.get("allPhones") or row.get("phone") or "").strip(),
+                    (row.get("email") or "").strip(),
+                    (row.get("searchCity") or row.get("city") or "").strip(),
+                    (row.get("relevance") or "").strip().upper(),
+                )
+            )
+
+def get_stats():
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, COUNT(*) FROM clients GROUP BY status;")
+            rows = cur.fetchall()
+            stats = {r[0]: r[1] for r in rows}
+            cur.execute("SELECT COUNT(*) FROM clients;")
+            total = cur.fetchone()[0]
+    return total, stats
+
+def get_next_client():
+    """Следующий клиент для обзвона: сначала A, потом B, потом C, только 'not_called'"""
+    with db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT * FROM clients
+                WHERE status = 'not_called'
+                ORDER BY
+                    CASE relevance WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 ELSE 4 END,
+                    id
+                LIMIT 1;
+            """)
+            return cur.fetchone()
+
+def get_client(client_id):
+    with db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM clients WHERE id = %s;", (client_id,))
+            return cur.fetchone()
+
+def set_status(client_id, status):
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE clients SET status = %s, updated_at = NOW() WHERE id = %s;",
+                (status, client_id)
+            )
+        conn.commit()
+
+# ==================== БУРОВЫЕ (справочник) ====================
 RELEVANCE_LABEL = {"A": "⭐", "B": "○", "C": "·"}
 RELEVANCE_ORDER = {"A": 0, "B": 1, "C": 2, "": 3}
 
@@ -47,7 +146,6 @@ def load_bur_data():
 BUR_DATA = load_bur_data()
 CITIES = sorted(BUR_DATA.keys())
 PER_PAGE = 5
-print(f"[i] Загружено городов: {len(CITIES)}")
 
 def count_relevance(items):
     a = sum(1 for x in items if x["relevance"] == "A")
@@ -58,7 +156,7 @@ def count_relevance(items):
 # ==================== APIFY BALANCE ====================
 def get_apify_balance():
     if not APIFY_TOKEN:
-        return "⚠️ Токен Apify не настроен.\nДобавь APIFY_TOKEN в Environment на Render."
+        return "⚠️ Токен Apify не настроен."
     try:
         url = f"https://api.apify.com/v2/users/me/limits?token={APIFY_TOKEN}"
         r = requests.get(url, timeout=15).json()
@@ -66,11 +164,9 @@ def get_apify_balance():
         current = d.get("current", {})
         used = current.get("monthlyUsageUsd", 0)
         limit = d.get("maxMonthlyUsageUsd", 5)
-
         remaining = limit - used
         cities_left = int(remaining / 0.15) if remaining > 0 else 0
         percent = int((used / limit) * 100) if limit > 0 else 0
-
         return (
             f"💰 <b>Баланс Apify</b>\n\n"
             f"Потрачено: <b>${used:.2f}</b> из ${limit:.2f}\n"
@@ -90,6 +186,7 @@ def main_menu():
         types.InlineKeyboardButton("🏢 Буровые", callback_data="menu:bur"),
     )
     m.add(
+        types.InlineKeyboardButton("📋 CRM", callback_data="crm:menu"),
         types.InlineKeyboardButton("💰 Баланс Apify", callback_data="menu:balance"),
     )
     return m
@@ -97,6 +194,30 @@ def main_menu():
 def back_to_menu_btn():
     m = types.InlineKeyboardMarkup()
     m.add(types.InlineKeyboardButton("🏠 В меню", callback_data="menu:start"))
+    return m
+
+def crm_menu():
+    m = types.InlineKeyboardMarkup(row_width=2)
+    m.add(types.InlineKeyboardButton("📞 Начать обзвон", callback_data="crm:next"))
+    m.add(types.InlineKeyboardButton("📊 Статистика", callback_data="crm:stats"))
+    m.add(types.InlineKeyboardButton("🏠 В меню", callback_data="menu:start"))
+    return m
+
+def client_card_markup(client_id):
+    m = types.InlineKeyboardMarkup(row_width=2)
+    m.add(
+        types.InlineKeyboardButton("📞 Дозвонились", callback_data=f"crm:set:{client_id}:called"),
+        types.InlineKeyboardButton("📨 КП", callback_data=f"crm:set:{client_id}:kp_sent"),
+    )
+    m.add(
+        types.InlineKeyboardButton("🤔 Думает", callback_data=f"crm:set:{client_id}:thinking"),
+        types.InlineKeyboardButton("✅ Клиент", callback_data=f"crm:set:{client_id}:client"),
+    )
+    m.add(
+        types.InlineKeyboardButton("❌ Отказ", callback_data=f"crm:set:{client_id}:refused"),
+        types.InlineKeyboardButton("⏭ Пропустить", callback_data="crm:next"),
+    )
+    m.add(types.InlineKeyboardButton("◀️ В CRM", callback_data="crm:menu"))
     return m
 
 def cities_menu():
@@ -135,6 +256,26 @@ def render_companies(city_idx, page):
     m.add(types.InlineKeyboardButton("◀️ К городам", callback_data="menu:bur"))
     m.add(types.InlineKeyboardButton("🏠 В меню", callback_data="menu:start"))
     return text, m
+
+def render_client_card(client):
+    if not client:
+        return (
+            "✅ <b>Все клиенты обработаны!</b>\n\n"
+            "В базе не осталось компаний со статусом «Не звонили».\n"
+            "Можешь посмотреть статистику или добавить новых через Apify.",
+            crm_menu()
+        )
+    mark = RELEVANCE_LABEL.get(client["relevance"], "")
+    status = STATUS_LABELS.get(client["status"], client["status"])
+    text = (
+        f"{mark} <b>{client['name']}</b>\n\n"
+        f"🏙 {client['city'] or '—'}\n"
+        f"📞 {client['phone'] or '—'}\n"
+        f"✉️ {client['email'] or '—'}\n"
+        f"📊 Статус: {status}\n\n"
+        f"Выбери действие:"
+    )
+    return text, client_card_markup(client["id"])
 
 # ==================== ОБРАБОТЧИКИ ====================
 @bot.message_handler(commands=['start'])
@@ -190,6 +331,38 @@ def cb_page(call):
 @bot.callback_query_handler(func=lambda call: call.data == "noop")
 def cb_noop(call):
     bot.answer_callback_query(call.id)
+
+# ==================== CRM ====================
+@bot.callback_query_handler(func=lambda call: call.data == "crm:menu")
+def cb_crm_menu(call):
+    bot.answer_callback_query(call.id)
+    total, stats = get_stats()
+    text = "📋 <b>CRM — учёт клиентов</b>\n\n"
+    text += f"Всего в базе: <b>{total}</b>\n\n"
+    for key, label in STATUS_LABELS.items():
+        text += f"{label}: <b>{stats.get(key, 0)}</b>\n"
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=crm_menu(), parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "crm:stats")
+def cb_crm_stats(call):
+    bot.answer_callback_query(call.id)
+    cb_crm_menu(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "crm:next")
+def cb_crm_next(call):
+    bot.answer_callback_query(call.id)
+    client = get_next_client()
+    text, markup = render_client_card(client)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("crm:set:"))
+def cb_crm_set(call):
+    _, _, client_id, status = call.data.split(":")
+    set_status(int(client_id), status)
+    bot.answer_callback_query(call.id, f"Статус: {STATUS_LABELS.get(status, status)}")
+    client = get_next_client()
+    text, markup = render_client_card(client)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 # ==================== ПОГОДА ====================
 WEATHER_DESC = {
@@ -330,6 +503,11 @@ def health():
     return "OK"
 
 if __name__ == "__main__":
+    try:
+        init_db()
+        print("[i] База данных инициализирована")
+    except Exception as e:
+        print(f"[!] Ошибка инициализации БД: {e}")
     bot.remove_webhook()
     bot.set_webhook(url=WEBHOOK_URL)
     port = int(os.environ.get("PORT", 5000))
