@@ -1,5 +1,7 @@
 import os
 import csv
+import html
+import urllib.parse
 import telebot
 import requests
 import psycopg2
@@ -16,6 +18,15 @@ if not BOT_TOKEN:
         BOT_TOKEN = CFG_TOKEN
     except ImportError:
         raise ValueError("Нет ни TELEGRAM_TOKEN, ни config.py")
+
+# ==== БЕЛЫЙ СПИСОК ДОСТУПА ====
+ALLOWED_IDS = {840970840, 1069963014, 7527393497}
+
+def is_allowed(user_id):
+    return user_id in ALLOWED_IDS
+
+def denied_message(chat_id):
+    bot.send_message(chat_id, "⛔ Доступ закрыт. Обратитесь к владельцу бота.")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
@@ -38,7 +49,8 @@ def db():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def init_db():
-    with db() as conn:
+    conn = db()
+    try:
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS clients (
@@ -58,6 +70,8 @@ def init_db():
                 print("[i] Заливаю компании из CSV в базу...")
                 load_csv_to_db(cur)
         conn.commit()
+    finally:
+        conn.close()
 
 def load_csv_to_db(cur):
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_cities.csv")
@@ -77,15 +91,19 @@ def load_csv_to_db(cur):
             )
 
 def get_stats():
-    with db() as conn:
+    conn = db()
+    try:
         with conn.cursor() as cur:
             cur.execute("SELECT status, COUNT(*) FROM clients GROUP BY status;")
             stats = {r[0]: r[1] for r in cur.fetchall()}
             cur.execute("SELECT COUNT(*) FROM clients;")
             return cur.fetchone()[0], stats
+    finally:
+        conn.close()
 
 def get_next_client(status="not_called"):
-    with db() as conn:
+    conn = db()
+    try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT * FROM clients WHERE status = %s
@@ -93,30 +111,64 @@ def get_next_client(status="not_called"):
                 LIMIT 1;
             """, (status,))
             return cur.fetchone()
+    finally:
+        conn.close()
 
 def get_queue_count():
-    with db() as conn:
+    conn = db()
+    try:
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM clients WHERE status = 'not_called';")
             return cur.fetchone()[0]
+    finally:
+        conn.close()
 
 def get_skipped_count():
-    with db() as conn:
+    conn = db()
+    try:
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM clients WHERE status = 'skipped';")
             return cur.fetchone()[0]
+    finally:
+        conn.close()
 
 def set_status(client_id, status):
-    with db() as conn:
+    conn = db()
+    try:
         with conn.cursor() as cur:
             cur.execute("UPDATE clients SET status = %s, updated_at = NOW() WHERE id = %s;", (status, client_id))
         conn.commit()
+    finally:
+        conn.close()
+
+def get_statuses_for_page(city, names):
+    """Один запрос: получить статусы для списка названий в городе."""
+    if not names:
+        return {}
+    conn = db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, name, status FROM clients WHERE city = %s AND name = ANY(%s);",
+                (city, names)
+            )
+            result = {}
+            for row in cur.fetchall():
+                # Если дубли имён — оставим первый
+                if row["name"] not in result:
+                    result[row["name"]] = {"id": row["id"], "status": row["status"]}
+            return result
+    finally:
+        conn.close()
 
 def get_client_by_name_city(name, city):
-    with db() as conn:
+    conn = db()
+    try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM clients WHERE name = %s AND city = %s LIMIT 1;", (name, city))
             return cur.fetchone()
+    finally:
+        conn.close()
 
 RELEVANCE_LABEL = {"A": "⭐", "B": "○", "C": "·"}
 RELEVANCE_ORDER = {"A": 0, "B": 1, "C": 2, "": 3}
@@ -161,15 +213,30 @@ def get_apify_balance():
         used = d.get("current", {}).get("monthlyUsageUsd", 0)
         limit = d.get("maxMonthlyUsageUsd", 5)
         rem = limit - used
+        percent = int(used / limit * 100) if limit > 0 else 0
+        cities_left = int(rem / 0.15) if rem > 0 else 0
         return (
             f"💰 <b>Баланс Apify</b>\n\n"
             f"Потрачено: <b>${used:.2f}</b> из ${limit:.2f}\n"
-            f"Остаток:   <b>${rem:.2f}</b>  ({int(used/limit*100)}%)\n\n"
-            f"💡 Хватит на <b>~{int(rem/0.15) if rem > 0 else 0}</b> городов\n"
+            f"Остаток:   <b>${rem:.2f}</b>  ({percent}%)\n\n"
+            f"💡 Хватит на <b>~{cities_left}</b> городов\n"
             f"📅 Следующие $5 придут ~7-го числа"
         )
     except Exception as e:
         return f"⚠️ Ошибка: {e}"
+
+def safe_edit(call, text, markup=None, parse_mode=None):
+    """Edit сообщения с защитой от 'message is not modified'."""
+    try:
+        bot.edit_message_text(
+            text, call.message.chat.id, call.message.message_id,
+            reply_markup=markup, parse_mode=parse_mode
+        )
+    except telebot.apihelper.ApiTelegramException as e:
+        if "message is not modified" not in str(e):
+            print(f"edit error: {e}")
+    except Exception as e:
+        print(f"edit error: {e}")
 
 def main_menu():
     m = types.InlineKeyboardMarkup(row_width=2)
@@ -248,31 +315,34 @@ def render_companies(city_idx, page):
     start = page * PER_PAGE
     chunk = items[start:start + PER_PAGE]
 
-    text = f"🏢 <b>{city}</b> — всего {total}\n⭐ {a}  ○ {b}  · {c}\n\n"
+    # Один запрос на страницу — статусы всех компаний
+    names = [item["name"] for item in chunk]
+    statuses = get_statuses_for_page(city, names)
+
+    text = f"🏢 <b>{html.escape(city)}</b> — всего {total}\n⭐ {a}  ○ {b}  · {c}\n\n"
     for i, item in enumerate(chunk, start=start + 1):
         mark = RELEVANCE_LABEL.get(item["relevance"], "")
-        client = get_client_by_name_city(item["name"], city)
-        status_e = STATUS_EMOJI.get(client["status"], "") if client else ""
-        text += f"{mark} <b>{i}. {item['name']}</b>  {status_e}\n📞 {item['phone']}\n✉️ {item['email']}\n\n"
+        st = statuses.get(item["name"], {})
+        status_e = STATUS_EMOJI.get(st.get("status", ""), "") if st else ""
+        name_esc = html.escape(item["name"])
+        phone_esc = html.escape(item["phone"])
+        email_esc = html.escape(item["email"])
+        text += f"{mark} <b>{i}. {name_esc}</b>  {status_e}\n📞 {phone_esc}\n✉️ {email_esc}\n\n"
     text += f"Страница {page + 1} из {total_pages}"
 
     m = types.InlineKeyboardMarkup(row_width=3)
-    prev_btn = types.InlineKeyboardButton("◀️", callback_data=f"page:{city_idx}:{page-1}") if page > 0 else types.InlineKeyboardButton(" ", callback_data="noop")
+    prev_btn = types.InlineKeyboardButton("◀️", callback_data=f"page:{city_idx}:{page-1}") if page > 0 else types.InlineKeyboardButton("·", callback_data="noop")
     info = types.InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop")
-    nxt = types.InlineKeyboardButton("▶️", callback_data=f"page:{city_idx}:{page+1}") if page < total_pages - 1 else types.InlineKeyboardButton(" ", callback_data="noop")
+    nxt = types.InlineKeyboardButton("▶️", callback_data=f"page:{city_idx}:{page+1}") if page < total_pages - 1 else types.InlineKeyboardButton("·", callback_data="noop")
     m.add(prev_btn, info, nxt)
 
-    # Кнопки компаний: 5 в ряд, с глобальным индексом
-    num_row = types.InlineKeyboardMarkup(row_width=5)
     num_btns = []
     for i in range(len(chunk)):
         global_idx = start + i
         num_btns.append(types.InlineKeyboardButton(str(i + 1), callback_data=f"comp:{city_idx}:{global_idx}"))
     if num_btns:
-        num_row.add(*num_btns)
-    # Объединяем клавиатуры: сначала пагинация, потом номера, потом навигация
-    for row in num_row.keyboard:
-        m.keyboard.append(row)
+        m.add(*num_btns)
+
     m.add(types.InlineKeyboardButton("◀️ К городам", callback_data="menu:bur"))
     m.add(types.InlineKeyboardButton("🏠 В меню", callback_data="menu:start"))
     return text, m
@@ -293,8 +363,8 @@ def render_company_card(city_idx, global_idx):
 
     mark = RELEVANCE_LABEL.get(item["relevance"], "")
     text = (
-        f"{mark} <b>{item['name']}</b>\n\n"
-        f"🏙 {city}\n📞 {item['phone']}\n✉️ {item['email']}\n\n"
+        f"{mark} <b>{html.escape(item['name'])}</b>\n\n"
+        f"🏙 {html.escape(city)}\n📞 {html.escape(item['phone'])}\n✉️ {html.escape(item['email'])}\n\n"
         f"📊 Статус: {status}\n\n"
         f"Выбери новое действие:"
     )
@@ -318,17 +388,27 @@ def render_company_card(city_idx, global_idx):
 
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    bot.send_message(message.chat.id, f"Привет, {message.from_user.first_name}! Выбери раздел:", reply_markup=main_menu())
+    if not is_allowed(message.from_user.id):
+        denied_message(message.chat.id)
+        return
+    bot.send_message(message.chat.id, f"Привет, {html.escape(message.from_user.first_name)}! Выбери раздел:", reply_markup=main_menu())
+
+@bot.callback_query_handler(func=lambda call: True)
+def guard(call):
+    if not is_allowed(call.from_user.id):
+        bot.answer_callback_query(call.id, "⛔ Доступ закрыт")
+        return
+    return False
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu:start")
 def cb_menu_start(call):
     bot.answer_callback_query(call.id)
-    bot.edit_message_text("Выбери раздел:", call.message.chat.id, call.message.message_id, reply_markup=main_menu())
+    safe_edit(call, "Выбери раздел:", main_menu())
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu:weather")
 def cb_menu_weather(call):
     bot.answer_callback_query(call.id)
-    bot.edit_message_text("🌤 Напиши город:", call.message.chat.id, call.message.message_id, reply_markup=back_to_menu_btn())
+    safe_edit(call, "🌤 Напиши город:", back_to_menu_btn())
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu:balance")
 def cb_menu_balance(call):
@@ -337,36 +417,36 @@ def cb_menu_balance(call):
     m = types.InlineKeyboardMarkup()
     m.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="menu:balance"))
     m.add(types.InlineKeyboardButton("🏠 В меню", callback_data="menu:start"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=m, parse_mode="HTML")
+    safe_edit(call, text, m, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu:bur")
 def cb_menu_bur(call):
     bot.answer_callback_query(call.id)
     if not CITIES:
-        bot.edit_message_text("База пуста.", call.message.chat.id, call.message.message_id, reply_markup=back_to_menu_btn())
+        safe_edit(call, "База пуста.", back_to_menu_btn())
         return
-    bot.edit_message_text(f"🏢 Выбери город ({len(CITIES)}):", call.message.chat.id, call.message.message_id, reply_markup=cities_menu())
+    safe_edit(call, f"🏢 Выбери город ({len(CITIES)}):", cities_menu())
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("city:"))
 def cb_city(call):
     bot.answer_callback_query(call.id)
     idx = int(call.data.split(":")[1])
     text, markup = render_companies(idx, 0)
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    safe_edit(call, text, markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("page:"))
 def cb_page(call):
     bot.answer_callback_query(call.id)
     _, city_idx, page = call.data.split(":")
     text, markup = render_companies(int(city_idx), int(page))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    safe_edit(call, text, markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("comp:"))
 def cb_comp(call):
     bot.answer_callback_query(call.id)
     _, city_idx, global_idx = call.data.split(":")
     text, markup = render_company_card(int(city_idx), int(global_idx))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    safe_edit(call, text, markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cs:"))
 def cb_cs(call):
@@ -381,7 +461,7 @@ def cb_cs(call):
     else:
         bot.answer_callback_query(call.id, "Не найден в CRM")
     text, markup = render_company_card(city_idx, global_idx)
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    safe_edit(call, text, markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "noop")
 def cb_noop(call):
@@ -394,26 +474,30 @@ def cb_crm_menu(call):
     text = "📋 <b>CRM — учёт клиентов</b>\n\n" + f"Всего: <b>{total}</b>\n\n"
     for key, label in STATUS_LABELS.items():
         text += f"{label}: <b>{stats.get(key, 0)}</b>\n"
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=crm_menu(), parse_mode="HTML")
+    safe_edit(call, text, crm_menu(), parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "crm:stats")
 def cb_crm_stats(call):
     bot.answer_callback_query(call.id)
-    cb_crm_menu(call)
+    total, stats = get_stats()
+    text = "📊 <b>Статистика CRM</b>\n\n" + f"Всего: <b>{total}</b>\n\n"
+    for key, label in STATUS_LABELS.items():
+        text += f"{label}: <b>{stats.get(key, 0)}</b>\n"
+    safe_edit(call, text, crm_menu(), parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "crm:next")
 def cb_crm_next(call):
     bot.answer_callback_query(call.id)
     client = get_next_client("not_called")
     text, markup = render_client_card(client)
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    safe_edit(call, text, markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "crm:skipped")
 def cb_crm_skipped(call):
     bot.answer_callback_query(call.id)
     client = get_next_client("skipped")
     text, markup = render_skipped_card(client)
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    safe_edit(call, text, markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("crm:set:"))
 def cb_crm_set(call):
@@ -426,7 +510,7 @@ def cb_crm_set(call):
     else:
         client = get_next_client("not_called")
         text, markup = render_client_card(client)
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    safe_edit(call, text, markup, parse_mode="HTML")
 
 def render_client_card(client):
     if not client:
@@ -440,8 +524,12 @@ def render_client_card(client):
     status = STATUS_LABELS.get(client["status"], client["status"])
     queue = get_queue_count()
     text = (
-        f"{mark} <b>{client['name']}</b>\n\n🏙 {client['city'] or '—'}\n📞 {client['phone'] or '—'}\n"
-        f"✉️ {client['email'] or '—'}\n📊 Статус: {status}\n📋 Осталось: <b>{queue}</b>\n\nВыбери действие:"
+        f"{mark} <b>{html.escape(client['name'])}</b>\n\n"
+        f"🏙 {html.escape(client['city'] or '—')}\n"
+        f"📞 {html.escape(client['phone'] or '—')}\n"
+        f"✉️ {html.escape(client['email'] or '—')}\n"
+        f"📊 Статус: {status}\n"
+        f"📋 Осталось: <b>{queue}</b>\n\nВыбери действие:"
     )
     return text, client_card_markup(client["id"])
 
@@ -450,8 +538,11 @@ def render_skipped_card(client):
         return ("✅ Пропущенных нет!", crm_menu())
     skipped = get_skipped_count()
     text = (
-        f"⏭ <b>{client['name']}</b>\n\n🏙 {client['city'] or '—'}\n📞 {client['phone'] or '—'}\n"
-        f"✉️ {client['email'] or '—'}\n📊 {STATUS_LABELS.get(client['status'], client['status'])}\n"
+        f"⏭ <b>{html.escape(client['name'])}</b>\n\n"
+        f"🏙 {html.escape(client['city'] or '—')}\n"
+        f"📞 {html.escape(client['phone'] or '—')}\n"
+        f"✉️ {html.escape(client['email'] or '—')}\n"
+        f"📊 {STATUS_LABELS.get(client['status'], client['status'])}\n"
         f"⏭ Всего пропущено: <b>{skipped}</b>"
     )
     return text, skipped_card_markup(client["id"])
@@ -462,23 +553,45 @@ COUNTRY_RU = {"Russia":"Россия","Kazakhstan":"Казахстан","Ukraine
 
 def try_open_meteo(city):
     try:
-        geo = requests.get(f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=ru", timeout=10).json()
+        geo = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": city, "count": 1, "language": "ru"},
+            timeout=10
+        ).json()
         if not geo.get("results"):
             return "NOT_FOUND"
         loc = geo["results"][0]
-        w = requests.get(f"https://api.open-meteo.com/v1/forecast?latitude={loc['latitude']}&longitude={loc['longitude']}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code&timezone=auto", timeout=10).json()
+        w = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": loc["latitude"],
+                "longitude": loc["longitude"],
+                "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
+                "timezone": "auto"
+            },
+            timeout=10
+        ).json()
         if "current" not in w:
             return None
         c = w["current"]
         country = COUNTRY_RU.get(loc.get("country", ""), loc.get("country", ""))
-        return f"📍 <b>{loc['name']}</b>, {country}\nПогода: {WEATHER_DESC.get(c['weather_code'], '—')}\n🌡️ <b>{c['temperature_2m']}°C</b>\n💧 {c['relative_humidity_2m']}%\n💨 {c['wind_speed_10m']} км/ч"
+        return (
+            f"📍 <b>{html.escape(loc['name'])}</b>, {html.escape(country)}\n"
+            f"Погода: {WEATHER_DESC.get(c['weather_code'], '—')}\n"
+            f"🌡️ <b>{c['temperature_2m']}°C</b>\n"
+            f"💧 {c['relative_humidity_2m']}%\n"
+            f"💨 {c['wind_speed_10m']} км/ч"
+        )
     except Exception as e:
-        print(e); return None
+        print(f"open-meteo: {e}")
+        return None
 
 def try_wttr(city):
     try:
-        r = requests.get(f"https://wttr.in/{city}", params={"format":"j1","lang":"ru"}, timeout=15).json()
-        if "current_condition" not in r: return None
+        safe_city = urllib.parse.quote(city)
+        r = requests.get(f"https://wttr.in/{safe_city}", params={"format": "j1", "lang": "ru"}, timeout=15).json()
+        if "current_condition" not in r:
+            return None
         c = r["current_condition"][0]
         desc = c["lang_ru"][0]["value"] if c.get("lang_ru") else c["weatherDesc"][0]["value"]
         desc = WTTR.get(desc, desc)
@@ -488,22 +601,40 @@ def try_wttr(city):
             if a.get("country"):
                 raw = a["country"][0]["value"]
                 country = COUNTRY_RU.get(raw, raw)
-        return f"📍 <b>{city.capitalize()}</b>, {country}\nПогода: {desc}\n🌡️ <b>{c.get('temp_C','?')}°C</b>\n💧 {c.get('humidity','?')}%\n💨 {c.get('windspeedKmph','?')} км/ч"
+        return (
+            f"📍 <b>{html.escape(city.capitalize())}</b>, {html.escape(country)}\n"
+            f"Погода: {desc}\n"
+            f"🌡️ <b>{c.get('temp_C','?')}°C</b>\n"
+            f"💧 {c.get('humidity','?')}%\n"
+            f"💨 {c.get('windspeedKmph','?')} км/ч"
+        )
     except Exception as e:
-        print(e); return None
+        print(f"wttr: {e}")
+        return None
 
 @bot.message_handler(func=lambda m: True)
 def get_weather(message):
+    if not is_allowed(message.from_user.id):
+        denied_message(message.chat.id)
+        return
     try:
         city = message.text.strip()
         res = try_open_meteo(city)
         if res is None or res == "NOT_FOUND":
             res = try_wttr(city)
         if res is None:
-            bot.reply_to(message, f"Не нашёл '{city}'.", reply_markup=back_to_menu_btn()); return
+            bot.reply_to(message, f"Не нашёл '{html.escape(city)}'.", reply_markup=back_to_menu_btn())
+            return
         bot.reply_to(message, res, parse_mode="HTML", reply_markup=back_to_menu_btn())
     except Exception as e:
         bot.reply_to(message, f"Ошибка: {e}", reply_markup=back_to_menu_btn())
+
+# ==== Инициализация при импорте (не только в __main__) ====
+try:
+    init_db()
+    print("[i] БД инициализирована")
+except Exception as e:
+    print(f"[!] Ошибка БД: {e}")
 
 WEBHOOK_URL = f"https://weather-bot-0v1m.onrender.com/{BOT_TOKEN}"
 
@@ -516,16 +647,17 @@ def webhook():
     return 'Forbidden', 403
 
 @app.route('/')
-def index(): return "Bot is running!"
+def index():
+    return "Bot is running!"
 
 @app.route('/health')
-def health(): return "OK"
+def health():
+    return "OK"
 
 if __name__ == "__main__":
     try:
-        init_db(); print("[i] БД инициализирована")
+        bot.remove_webhook()
+        bot.set_webhook(url=WEBHOOK_URL)
     except Exception as e:
-        print(f"[!] Ошибка БД: {e}")
-    bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL)
+        print(f"[!] webhook error: {e}")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
