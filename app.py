@@ -31,6 +31,16 @@ STATUS_LABELS = {
     "skipped": "⏭ Пропущен",
 }
 
+STATUS_EMOJI = {
+    "not_called": "⚪",
+    "called": "📞",
+    "kp_sent": "📨",
+    "thinking": "🤔",
+    "client": "✅",
+    "refused": "❌",
+    "skipped": "⏭",
+}
+
 def db():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
@@ -79,8 +89,7 @@ def get_stats():
     with db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT status, COUNT(*) FROM clients GROUP BY status;")
-            rows = cur.fetchall()
-            stats = {r[0]: r[1] for r in rows}
+            stats = {r[0]: r[1] for r in cur.fetchall()}
             cur.execute("SELECT COUNT(*) FROM clients;")
             total = cur.fetchone()[0]
     return total, stats
@@ -89,11 +98,8 @@ def get_next_client(status="not_called"):
     with db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT * FROM clients
-                WHERE status = %s
-                ORDER BY
-                    CASE relevance WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 ELSE 4 END,
-                    id
+                SELECT * FROM clients WHERE status = %s
+                ORDER BY CASE relevance WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 ELSE 4 END, id
                 LIMIT 1;
             """, (status,))
             return cur.fetchone()
@@ -113,11 +119,15 @@ def get_skipped_count():
 def set_status(client_id, status):
     with db() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE clients SET status = %s, updated_at = NOW() WHERE id = %s;",
-                (status, client_id)
-            )
+            cur.execute("UPDATE clients SET status = %s, updated_at = NOW() WHERE id = %s;", (status, client_id))
         conn.commit()
+
+def get_client_by_name_city(name, city):
+    """Ищет клиента в CRM по имени + городу."""
+    with db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM clients WHERE name = %s AND city = %s LIMIT 1;", (name, city))
+            return cur.fetchone()
 
 # ==================== БУРОВЫЕ ====================
 RELEVANCE_LABEL = {"A": "⭐", "B": "○", "C": "·"}
@@ -155,7 +165,7 @@ def count_relevance(items):
     c = sum(1 for x in items if x["relevance"] == "C")
     return a, b, c
 
-# ==================== APIFY BALANCE ====================
+# ==================== APIFY ====================
 def get_apify_balance():
     if not APIFY_TOKEN:
         return "⚠️ Токен Apify не настроен."
@@ -264,7 +274,12 @@ def render_companies(city_idx, page):
     text += f"⭐ {a}  ○ {b}  · {c}\n\n"
     for i, item in enumerate(chunk, start=start + 1):
         mark = RELEVANCE_LABEL.get(item["relevance"], "")
-        text += f"{mark} <b>{i}. {item['name']}</b>\n📞 {item['phone']}\n✉️ {item['email']}\n\n"
+        # Ищем статус в CRM по имени + городу
+        client = get_client_by_name_city(item["name"], city)
+        status_e = STATUS_EMOJI.get(client["status"], "") if client else ""
+        status_str = f"  {status_e}" if status_e else ""
+        text += f"{mark} <b>{i}. {item['name']}</b>{status_str}\n"
+        text += f"📞 {item['phone']}\n✉️ {item['email']}\n\n"
     text += f"Страница {page + 1} из {total_pages}"
 
     m = types.InlineKeyboardMarkup(row_width=3)
@@ -272,59 +287,59 @@ def render_companies(city_idx, page):
     info_btn = types.InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop")
     next_btn = types.InlineKeyboardButton("▶️", callback_data=f"page:{city_idx}:{page+1}") if page < total_pages - 1 else types.InlineKeyboardButton(" ", callback_data="noop")
     m.add(prev_btn, info_btn, next_btn)
+
+    # Кнопки с номерами компаний
+    num_buttons = []
+    for i in range(len(chunk)):
+        num_buttons.append(types.InlineKeyboardButton(str(i + 1), callback_data=f"comp:{city_idx}:{page}:{i}"))
+    if num_buttons:
+        m.add(*num_buttons)
+
     m.add(types.InlineKeyboardButton("◀️ К городам", callback_data="menu:bur"))
     m.add(types.InlineKeyboardButton("🏠 В меню", callback_data="menu:start"))
     return text, m
 
-def render_client_card(client):
-    if not client:
-        skipped = get_skipped_count()
-        if skipped > 0:
-            m = types.InlineKeyboardMarkup()
-            m.add(types.InlineKeyboardButton(f"⏭ К пропущенным ({skipped})", callback_data="crm:skipped"))
-            m.add(types.InlineKeyboardButton("◀️ В CRM", callback_data="crm:menu"))
-            return (
-                "✅ <b>Очередь пуста!</b>\n\n"
-                f"Все обработаны, но осталось <b>{skipped}</b> пропущенных.\n"
-                "Можешь к ним вернуться.",
-                m
-            )
-        return (
-            "✅ <b>Все клиенты обработаны!</b>\n\n"
-            "Отличная работа! Все компании прошли через CRM.",
-            crm_menu()
-        )
-    mark = RELEVANCE_LABEL.get(client["relevance"], "")
-    status = STATUS_LABELS.get(client["status"], client["status"])
-    queue = get_queue_count()
-    text = (
-        f"{mark} <b>{client['name']}</b>\n\n"
-        f"🏙 {client['city'] or '—'}\n"
-        f"📞 {client['phone'] or '—'}\n"
-        f"✉️ {client['email'] or '—'}\n"
-        f"📊 Статус: {status}\n"
-        f"📋 Осталось в очереди: <b>{queue}</b>\n\n"
-        f"Выбери действие:"
-    )
-    return text, client_card_markup(client["id"])
+def render_company_card(city_idx, page, idx):
+    city = CITIES[city_idx]
+    items = BUR_DATA[city]
+    start = page * PER_PAGE
+    item = items[start + idx]
 
-def render_skipped_card(client):
-    if not client:
-        return (
-            "✅ Пропущенных нет!",
-            crm_menu()
-        )
-    skipped = get_skipped_count()
+    client = get_client_by_name_city(item["name"], city)
+    if client:
+        status = STATUS_LABELS.get(client["status"], client["status"])
+        client_id = client["id"]
+    else:
+        status = "—"
+        client_id = None
+
+    mark = RELEVANCE_LABEL.get(item["relevance"], "")
     text = (
-        f"⏭ <b>{client['name']}</b>\n\n"
-        f"🏙 {client['city'] or '—'}\n"
-        f"📞 {client['phone'] or '—'}\n"
-        f"✉️ {client['email'] or '—'}\n"
-        f"📊 Статус: {STATUS_LABELS.get(client['status'], client['status'])}\n"
-        f"⏭ Всего пропущено: <b>{skipped}</b>\n\n"
-        f"Вернуть в очередь или сразу обработать?"
+        f"{mark} <b>{item['name']}</b>\n\n"
+        f"🏙 {city}\n"
+        f"📞 {item['phone']}\n"
+        f"✉️ {item['email']}\n\n"
+        f"📊 Статус: {status}\n\n"
+        f"Выбери новое действие:"
     )
-    return text, skipped_card_markup(client["id"])
+
+    m = types.InlineKeyboardMarkup(row_width=2)
+    if client_id:
+        m.add(
+            types.InlineKeyboardButton("📞 Дозвонились", callback_data=f"cs:{city_idx}:{page}:{idx}:called"),
+            types.InlineKeyboardButton("📨 КП", callback_data=f"cs:{city_idx}:{page}:{idx}:kp_sent"),
+        )
+        m.add(
+            types.InlineKeyboardButton("🤔 Думает", callback_data=f"cs:{city_idx}:{page}:{idx}:thinking"),
+            types.InlineKeyboardButton("✅ Клиент", callback_data=f"cs:{city_idx}:{page}:{idx}:client"),
+        )
+        m.add(
+            types.InlineKeyboardButton("❌ Отказ", callback_data=f"cs:{city_idx}:{page}:{idx}:refused"),
+            types.InlineKeyboardButton("⏭ Пропустить", callback_data=f"cs:{city_idx}:{page}:{idx}:skipped"),
+        )
+    m.add(types.InlineKeyboardButton("↩️ К списку компаний", callback_data=f"page:{city_idx}:{page}"))
+    m.add(types.InlineKeyboardButton("🏠 В меню", callback_data="menu:start"))
+    return text, m
 
 # ==================== ОБРАБОТЧИКИ ====================
 @bot.message_handler(commands=['start'])
@@ -376,6 +391,28 @@ def cb_page(call):
     text, markup = render_companies(int(city_idx), int(page))
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("comp:"))
+def cb_comp(call):
+    bot.answer_callback_query(call.id)
+    _, city_idx, page, idx = call.data.split(":")
+    text, markup = render_company_card(int(city_idx), int(page), int(idx))
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cs:"))
+def cb_cs(call):
+    _, city_idx, page, idx, status = call.data.split(":")
+    city_idx, page, idx = int(city_idx), int(page), int(idx)
+    city = CITIES[city_idx]
+    item = BUR_DATA[city][page * PER_PAGE + idx]
+    client = get_client_by_name_city(item["name"], city)
+    if client:
+        set_status(client["id"], status)
+        bot.answer_callback_query(call.id, f"Статус: {STATUS_LABELS.get(status, status)}")
+    else:
+        bot.answer_callback_query(call.id, "Не найден в CRM")
+    text, markup = render_company_card(city_idx, page, idx)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
 @bot.callback_query_handler(func=lambda call: call.data == "noop")
 def cb_noop(call):
     bot.answer_callback_query(call.id)
@@ -422,6 +459,51 @@ def cb_crm_set(call):
         client = get_next_client("not_called")
         text, markup = render_client_card(client)
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+def render_client_card(client):
+    if not client:
+        skipped = get_skipped_count()
+        if skipped > 0:
+            m = types.InlineKeyboardMarkup()
+            m.add(types.InlineKeyboardButton(f"⏭ К пропущенным ({skipped})", callback_data="crm:skipped"))
+            m.add(types.InlineKeyboardButton("◀️ В CRM", callback_data="crm:menu"))
+            return (
+                "✅ <b>Очередь пуста!</b>\n\n"
+                f"Все обработаны, но осталось <b>{skipped}</b> пропущенных.",
+                m
+            )
+        return (
+            "✅ <b>Все клиенты обработаны!</b>\n\n"
+            "Отличная работа!",
+            crm_menu()
+        )
+    mark = RELEVANCE_LABEL.get(client["relevance"], "")
+    status = STATUS_LABELS.get(client["status"], client["status"])
+    queue = get_queue_count()
+    text = (
+        f"{mark} <b>{client['name']}</b>\n\n"
+        f"🏙 {client['city'] or '—'}\n"
+        f"📞 {client['phone'] or '—'}\n"
+        f"✉️ {client['email'] or '—'}\n"
+        f"📊 Статус: {status}\n"
+        f"📋 Осталось в очереди: <b>{queue}</b>\n\n"
+        f"Выбери действие:"
+    )
+    return text, client_card_markup(client["id"])
+
+def render_skipped_card(client):
+    if not client:
+        return ("✅ Пропущенных нет!", crm_menu())
+    skipped = get_skipped_count()
+    text = (
+        f"⏭ <b>{client['name']}</b>\n\n"
+        f"🏙 {client['city'] or '—'}\n"
+        f"📞 {client['phone'] or '—'}\n"
+        f"✉️ {client['email'] or '—'}\n"
+        f"📊 Статус: {STATUS_LABELS.get(client['status'], client['status'])}\n"
+        f"⏭ Всего пропущено: <b>{skipped}</b>"
+    )
+    return text, skipped_card_markup(client["id"])
 
 # ==================== ПОГОДА ====================
 WEATHER_DESC = {
